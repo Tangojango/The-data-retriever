@@ -144,6 +144,12 @@ if scan:
         f"**Range:** {scan['date_min'].strftime('%Y-%m-%d')} "
         f"\u2192 {scan['date_max'].strftime('%Y-%m-%d')}"
     )
+    st.info(
+        "ℹ️ This view shows **archived data only**. "
+        "Data collected in the last few hours may not appear yet — "
+        "the instrument archives files periodically. "
+        "Contact Picarro support to enable a live-data share if real-time access is needed."
+    )
 
 # ---------------------------------------------------------------------------
 # Step 2 — Select date range and load
