@@ -120,7 +120,7 @@ def scan_instrument_folder(folder_path: str) -> Dict:
 
     files_list.sort(key=lambda x: x["file_date"])
 
-    columns = _discover_columns(files_list)
+    columns, col_error = _discover_columns(files_list)
 
     return {
         "serial": serial or "UNKNOWN",
@@ -129,6 +129,7 @@ def scan_instrument_folder(folder_path: str) -> Dict:
         "file_count": len(files_list),
         "files_list": files_list,
         "columns": columns,
+        "col_error": col_error,
     }
 
 
@@ -136,24 +137,53 @@ def scan_instrument_folder(folder_path: str) -> Dict:
 # Column discovery
 # ---------------------------------------------------------------------------
 
-def _discover_columns(files_list: List[Dict], max_tries: int = 5) -> List[str]:
+def _discover_columns(files_list: List[Dict], max_tries: int = 5) -> Tuple[List[str], str]:
     """
     Read column names from the first readable file in the list.
-    Returns an empty list if no file can be opened.
+
+    Returns (columns, error_message).
+    columns is empty and error_message is set if nothing could be read.
     """
+    errors = []
     for file_info in files_list[:max_tries]:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 with zipfile.ZipFile(file_info["zip_path"], "r") as zf:
                     zf.extract(file_info["hdf5_file"], path=tmp)
-                tmp_path = os.path.join(tmp, file_info["hdf5_file"])
+
+                # Walk the temp dir to find the extracted h5 file — avoids
+                # path-separator issues on Windows (zip uses /, Windows uses \).
+                tmp_path = None
+                for root, _dirs, files in os.walk(tmp):
+                    for f in files:
+                        if f.lower().endswith(".h5"):
+                            tmp_path = os.path.join(root, f)
+                            break
+                    if tmp_path:
+                        break
+
+                if tmp_path is None:
+                    errors.append(f"{file_info['hdf5_file']}: extracted file not found in temp dir")
+                    continue
+
+                # Try common Picarro HDF5 keys
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    df = pd.read_hdf(tmp_path, key="results", start=0, stop=10)
-                return list(df.columns)
-        except Exception:
+                    for key in ("results", "/results", "data", "/data"):
+                        try:
+                            df = pd.read_hdf(tmp_path, key=key, start=0, stop=10)
+                            return list(df.columns), ""
+                        except KeyError:
+                            continue
+                        except Exception as e:
+                            errors.append(f"{file_info['hdf5_file']} key={key}: {e}")
+                            break
+
+        except Exception as e:
+            errors.append(f"{file_info['zip_path']}: {e}")
             continue
-    return []
+
+    return [], "\n".join(errors) if errors else "No readable h5 files found."
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +221,18 @@ def load_data(
             with tempfile.TemporaryDirectory() as tmp:
                 with zipfile.ZipFile(file_info["zip_path"], "r") as zf:
                     zf.extract(file_info["hdf5_file"], path=tmp)
-                tmp_path = os.path.join(tmp, file_info["hdf5_file"])
+
+                tmp_path = None
+                for root, _dirs, files in os.walk(tmp):
+                    for f in files:
+                        if f.lower().endswith(".h5"):
+                            tmp_path = os.path.join(root, f)
+                            break
+                    if tmp_path:
+                        break
+
+                if tmp_path is None:
+                    continue
 
                 file_chunks: List[pd.DataFrame] = []
                 for chunk in pd.read_hdf(tmp_path, key="results", iterator=True):

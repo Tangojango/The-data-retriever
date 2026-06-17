@@ -150,6 +150,8 @@ if scan:
         f"**Date range:** {scan['date_min'].strftime('%Y-%m-%d')} "
         f"\u2192 {scan['date_max'].strftime('%Y-%m-%d')}"
     )
+    if scan.get("col_error"):
+        st.warning(f"⚠️ Could not read column list:\n\n```\n{scan['col_error']}\n```")
 
 # ---------------------------------------------------------------------------
 # Step 2 — Select (only after a successful scan)
