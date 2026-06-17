@@ -144,6 +144,13 @@ if scan:
         f"**Range:** {scan['date_min'].strftime('%Y-%m-%d')} "
         f"\u2192 {scan['date_max'].strftime('%Y-%m-%d')}"
     )
+    if not scan.get("serial_found"):
+        st.warning(
+            "⚠️ Could not detect instrument serial. "
+            "Run this in the DataRetriever folder to debug:\n\n"
+            "```\npython -c \"from data_retriever_linux import scan_instrument_folder; "
+            "r=scan_instrument_folder(r'Y:\\\\'); print(r)\"\n```"
+        )
 
 # ---------------------------------------------------------------------------
 # Step 2 — Select date range and load

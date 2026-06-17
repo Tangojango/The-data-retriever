@@ -103,10 +103,13 @@ def scan_instrument_folder(folder_path: str) -> Dict:
                 dates.append(entry_dt)
 
     # If serial not found from root zips, open one zip inside a dated subfolder
-    # and read the h5 filename from its contents
+    # and read the h5 filename from its contents.
+    # Only look in plain YYYY-MM-DD folders — explicitly skip anything with -RDF or other suffixes.
     if serial is None:
         for entry in sorted(entries):
-            if not _DATE_FOLDER_RE.match(entry):
+            if not _DATE_FOLDER_RE.match(entry):  # skips YYYY-MM-DD-RDF and anything else
+                continue
+            if "-RDF" in entry.upper():            # belt-and-suspenders
                 continue
             search_dirs = [
                 os.path.join(folder_path, entry, "Datalog_Private"),
@@ -156,6 +159,7 @@ def scan_instrument_folder(folder_path: str) -> Dict:
 
     return {
         "serial": serial or "UNKNOWN",
+        "serial_found": serial is not None,
         "date_min": dates[0],
         "date_max": dates[-1],
         "folder_count": folder_count,
