@@ -11,3 +11,4 @@ dependencies:
   - pip:
     - plotly>=5.20     # not on defaults channel, install via pip
     - streamlit>=1.35
+    - kaleido>=0.2     # required for PDF chart export

@@ -11,12 +11,14 @@ Workflow:
   Step 4  Export   — CSV + HDF5 + copies of source zips (audit trail)
 """
 
+import io
 import os
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from data_retriever_linux import (
@@ -72,14 +74,17 @@ def _datetime_axis(df: pd.DataFrame) -> pd.Series:
 # Session-state initialisation
 # ---------------------------------------------------------------------------
 
+_DEFAULT_EXPORTS = str(Path.home() / "Documents" / "PI_Exports")
+
 defaults = {
     "data_folder": r"Y:\\",
-    "exports_folder": r"Y:\\Exports",
+    "exports_folder": _DEFAULT_EXPORTS,
     "scan": None,
     "data_df": None,
     "used_zips": [],
     "date_from": None,
     "date_to": None,
+    "chart_fig": None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -138,18 +143,20 @@ if scan_clicked:
 
 scan = st.session_state.scan
 if scan:
+    live_count = scan.get("live_count", 0)
+    live_str = f"  \u2002|\u2002  **Live files:** {live_count}" if live_count else ""
     st.success(
         f"**Instrument:** {scan['serial']}  \u2002|\u2002  "
-        f"**Date folders:** {scan['folder_count']}  \u2002|\u2002  "
+        f"**Archive folders:** {scan['folder_count']}"
+        f"{live_str}  \u2002|\u2002  "
         f"**Range:** {scan['date_min'].strftime('%Y-%m-%d')} "
         f"\u2192 {scan['date_max'].strftime('%Y-%m-%d')}"
     )
-    st.info(
-        "ℹ️ This view shows **archived data only**. "
-        "Data collected in the last few hours may not appear yet — "
-        "the instrument archives files periodically. "
-        "Contact Picarro support to enable a live-data share if real-time access is needed."
-    )
+    if not live_count:
+        st.info(
+            "ℹ️ No live data folder detected. Data from the last few hours may not appear yet. "
+            "See INSTRUMENT_SETUP.md to enable live data access."
+        )
 
 # ---------------------------------------------------------------------------
 # Step 2 — Select date range and load
@@ -162,37 +169,61 @@ if scan:
 
     col_from, col_to = st.columns(2)
     with col_from:
-        date_from = st.date_input(
-            "From",
+        st.caption("From")
+        fc1, fc2 = st.columns([3, 2])
+        date_from = fc1.date_input(
+            "From date", label_visibility="collapsed",
             value=scan["date_min"].date(),
             min_value=scan["date_min"].date(),
             max_value=scan["date_max"].date(),
         )
+        time_from = fc2.time_input(
+            "From time", label_visibility="collapsed",
+            value=dt_time(0, 0, 0),
+            step=60,
+        )
     with col_to:
-        date_to = st.date_input(
-            "To",
+        st.caption("To")
+        tc1, tc2 = st.columns([3, 2])
+        date_to = tc1.date_input(
+            "To date", label_visibility="collapsed",
             value=scan["date_max"].date(),
             min_value=scan["date_min"].date(),
             max_value=scan["date_max"].date(),
+        )
+        time_to = tc2.time_input(
+            "To time", label_visibility="collapsed",
+            value=dt_time(23, 59, 59),
+            step=60,
         )
 
     load_clicked = st.button("📥 Load Data", type="primary")
 
     if load_clicked:
-        dt_from = datetime.combine(date_from, datetime.min.time())
-        dt_to = datetime.combine(date_to, datetime.max.time())
-        with st.spinner("Loading data…"):
-            try:
-                df, used_zips = load_data(
-                    scan["folder_path"], dt_from, dt_to
-                )
-                st.session_state.data_df = df
-                st.session_state.used_zips = used_zips
-                st.session_state.date_from = date_from
-                st.session_state.date_to = date_to
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+        dt_from = datetime.combine(date_from, time_from)
+        dt_to = datetime.combine(date_to, time_to)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        try:
+            def _on_progress(frac: float, msg: str) -> None:
+                progress_bar.progress(min(frac, 1.0))
+                status_text.caption(msg)
+
+            df, used_zips = load_data(
+                scan["folder_path"], dt_from, dt_to,
+                progress_cb=_on_progress,
+            )
+            st.session_state.data_df = df
+            st.session_state.used_zips = used_zips
+            st.session_state.date_from = date_from
+            st.session_state.date_to = date_to
+            progress_bar.empty()
+            status_text.empty()
+            st.rerun()
+        except Exception as exc:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(str(exc))
 
 # ---------------------------------------------------------------------------
 # Step 3 — Charts
@@ -209,13 +240,20 @@ if st.session_state.data_df is not None:
     )
 
     dt_axis = _datetime_axis(df)
+    available_cols = [c for c in MEASURE_COLS if c in df.columns]
 
     for col in MEASURE_COLS:
         if col not in df.columns:
             st.info(f"{col} — not found in this dataset, skipping.")
-            continue
 
-        fig = go.Figure()
+    n = len(available_cols)
+    fig = make_subplots(
+        rows=n, cols=1,
+        shared_xaxes=True,
+        subplot_titles=available_cols,
+        vertical_spacing=0.06,
+    )
+    for i, col in enumerate(available_cols, start=1):
         fig.add_trace(
             go.Scatter(
                 x=dt_axis,
@@ -223,19 +261,28 @@ if st.session_state.data_df is not None:
                 mode="lines",
                 name=col,
                 line=dict(width=1),
-            )
+            ),
+            row=i, col=1,
         )
-        fig.update_layout(
-            title=dict(text=col, font=dict(size=14)),
-            xaxis_title="Time (UTC)",
-            yaxis_title=col,
-            height=320,
-            margin=dict(l=60, r=20, t=40, b=40),
-            xaxis=dict(showgrid=True, gridcolor="#e5e5e5"),
-            yaxis=dict(showgrid=True, gridcolor="#e5e5e5"),
-            plot_bgcolor="#fafafa",
+        fig.update_yaxes(
+            title_text=col,
+            showgrid=True, gridcolor="#e5e5e5",
+            row=i, col=1,
         )
-        st.plotly_chart(fig, use_container_width=True)
+
+    fig.update_xaxes(
+        title_text="Time (UTC)",
+        showgrid=True, gridcolor="#e5e5e5",
+        row=n, col=1,
+    )
+    fig.update_layout(
+        height=280 * n,
+        margin=dict(l=60, r=20, t=40, b=40),
+        plot_bgcolor="#fafafa",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.session_state.chart_fig = fig
 
     # -----------------------------------------------------------------------
     # Step 4 — Export
@@ -245,7 +292,7 @@ if st.session_state.data_df is not None:
     st.subheader("Step 4 — Export")
     st.caption(
         "Creates a timestamped subfolder with CSV, HDF5, "
-        "and copies of the original source zip files."
+        "and copies of the original source files."
     )
 
     col_epath, col_ebrowse = st.columns([5, 1])
@@ -254,7 +301,7 @@ if st.session_state.data_df is not None:
             "Exports folder",
             value=st.session_state.exports_folder,
             label_visibility="collapsed",
-            placeholder=r"Y:\\Exports",
+            placeholder=_DEFAULT_EXPORTS,
         )
     with col_ebrowse:
         if st.button("Browse…", key="browse_exports", use_container_width=True):
@@ -263,34 +310,56 @@ if st.session_state.data_df is not None:
                 st.session_state.exports_folder = picked
                 st.rerun()
 
-    if st.button("💾 Export (CSV + HDF5 + source files)", type="primary"):
-        s = st.session_state.scan["serial"]
-        d_from = st.session_state.date_from
-        d_to = st.session_state.date_to
-        ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}_{ts_now}"
-        export_dir = Path(exports_folder) / folder_name
-        base_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}"
+    col_exp, col_pdf = st.columns([3, 1])
 
-        with st.spinner("Exporting…"):
+    with col_exp:
+        if st.button("💾 Export (CSV + HDF5 + source files)", type="primary", use_container_width=True):
+            s = st.session_state.scan["serial"]
+            d_from = st.session_state.date_from
+            d_to = st.session_state.date_to
+            ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+            folder_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}_{ts_now}"
+            export_dir = Path(exports_folder) / folder_name
+            base_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}"
+
+            with st.spinner("Exporting…"):
+                try:
+                    export_dir.mkdir(parents=True, exist_ok=True)
+                    csv_path = export_dir / f"{base_name}.csv"
+                    h5_path = export_dir / f"{base_name}.h5"
+                    orig_dir = export_dir / "original_files"
+
+                    df.to_csv(csv_path, index=False)
+                    export_to_hdf5(df, str(h5_path))
+                    n_src = copy_source_files(st.session_state.used_zips, str(orig_dir))
+
+                    st.success(f"Exported to `{export_dir}`")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("CSV", f"{csv_path.stat().st_size / 1e6:.1f} MB")
+                    c2.metric("HDF5", f"{h5_path.stat().st_size / 1e6:.1f} MB")
+                    c3.metric("Source files copied", n_src)
+
+                except Exception as exc:
+                    st.error(f"Export failed: {exc}")
+
+    with col_pdf:
+        chart_fig = st.session_state.get("chart_fig")
+        if chart_fig is not None:
             try:
-                export_dir.mkdir(parents=True, exist_ok=True)
-                csv_path = export_dir / f"{base_name}.csv"
-                h5_path = export_dir / f"{base_name}.h5"
-                orig_dir = export_dir / "original_files"
-
-                df.to_csv(csv_path, index=False)
-                export_to_hdf5(df, str(h5_path))
-                n_zips = copy_source_files(st.session_state.used_zips, str(orig_dir))
-
-                st.success(f"Exported to `{export_dir}`")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("CSV", f"{csv_path.stat().st_size / 1e6:.1f} MB")
-                c2.metric("HDF5", f"{h5_path.stat().st_size / 1e6:.1f} MB")
-                c3.metric("Source zips copied", n_zips)
-
-            except Exception as exc:
-                st.error(f"Export failed: {exc}")
+                pdf_bytes = chart_fig.to_image(format="pdf")
+                s = st.session_state.scan["serial"]
+                d_from = st.session_state.date_from
+                d_to = st.session_state.date_to
+                pdf_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}.pdf"
+                st.download_button(
+                    "📄 Download PDF",
+                    data=pdf_bytes,
+                    file_name=pdf_name,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as pdf_err:
+                st.error(f"PDF export failed: {pdf_err}")
 
 # ---------------------------------------------------------------------------
 # Footer

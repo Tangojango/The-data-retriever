@@ -7,14 +7,19 @@ Designed for use with a Samba-mounted instrument share.
 Scan is instant — reads only directory/filenames, never opens a zip.
 Zips are opened only when the user triggers a data load.
 Columns are hardcoded: H2O2, H2O, CH4 (plus timestamp/time for the x-axis).
+
+Two data sources are handled transparently:
+  Archive  — YYYY-MM-DD/Datalog_Private/*.zip  (historical, zipped)
+  Live     — DataLogger/DataLog_Private/*.h5   (recent, plain h5 files)
 """
 
+import io
 import os
 import re
 import shutil
-import tempfile
 import warnings
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +44,9 @@ _FILENAME_RE = re.compile(r"^([A-Z0-9]+)-(\d{8})-(\d{6})Z-", re.IGNORECASE)
 
 # Matches dated subfolders: 2026-01-01
 _DATE_FOLDER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Path to live h5 files relative to the share root
+_LIVE_SUBPATH = os.path.join("DataLogger", "DataLog_Private")
 
 
 def parse_filename_metadata(filename: str) -> Optional[Tuple[str, datetime]]:
@@ -149,17 +157,49 @@ def scan_instrument_folder(folder_path: str) -> Dict:
             except ValueError:
                 pass
 
-        # Root-level zip (recent files not yet moved to a dated folder)
+        # Root-level zip — two sub-cases:
         elif entry.lower().endswith(".zip"):
             meta = parse_filename_metadata(entry)
             if meta:
+                # Standard Picarro-named zip (SERIAL-DATE-TIME-...)
                 entry_serial, entry_dt = meta
                 if serial is None:
                     serial = entry_serial
                 dates.append(entry_dt)
+            else:
+                # Non-standard name (e.g. DataLog_Private.zip) — peek inside
+                zip_path = os.path.join(folder_path, entry)
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        h5_names = [n for n in zf.namelist() if n.lower().endswith(".h5")]
+                    for h5_name in h5_names:
+                        h5_meta = parse_filename_metadata(os.path.basename(h5_name))
+                        if h5_meta:
+                            h5_serial, h5_dt = h5_meta
+                            if serial is None:
+                                serial = h5_serial
+                            dates.append(h5_dt)
+                except Exception:
+                    pass
 
-    # If serial not found from root zips, open one zip inside a dated subfolder
-    # and read the h5 filename from the zip's contents.
+    # Check live folder (DataLogger/DataLog_Private) for recent h5 files
+    live_folder = os.path.join(folder_path, _LIVE_SUBPATH)
+    live_count = 0
+    if os.path.isdir(live_folder):
+        try:
+            for fname in os.listdir(live_folder):
+                if fname.lower().endswith(".h5"):
+                    meta = parse_filename_metadata(fname)
+                    if meta:
+                        entry_serial, entry_dt = meta
+                        if serial is None:
+                            serial = entry_serial
+                        dates.append(entry_dt)
+                        live_count += 1
+        except Exception:
+            pass
+
+    # If serial still not found, open one zip inside a dated subfolder
     if serial is None:
         serial, serial_debug = _find_serial_from_subfolders(folder_path, entries)
     else:
@@ -179,6 +219,7 @@ def scan_instrument_folder(folder_path: str) -> Dict:
         "date_min": dates[0],
         "date_max": dates[-1],
         "folder_count": folder_count,
+        "live_count": live_count,
         "folder_path": folder_path,
     }
 
@@ -216,13 +257,123 @@ def _collect_zips(folder_path: str, date_from: datetime, date_to: datetime) -> L
             except Exception:
                 continue
 
-        # Root-level zip (recent)
+        # Root-level zip — two sub-cases:
         elif entry.lower().endswith(".zip"):
             meta = parse_filename_metadata(entry)
-            if meta and date_from <= meta[1] <= date_to:
-                zips.append(os.path.join(folder_path, entry))
+            if meta:
+                # Standard Picarro-named zip
+                if date_from <= meta[1] <= date_to:
+                    zips.append(os.path.join(folder_path, entry))
+            else:
+                # Non-standard name (e.g. DataLog_Private.zip) — peek inside
+                zip_path = os.path.join(folder_path, entry)
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        h5_names = [n for n in zf.namelist() if n.lower().endswith(".h5")]
+                    for h5_name in h5_names:
+                        h5_meta = parse_filename_metadata(os.path.basename(h5_name))
+                        if h5_meta and date_from <= h5_meta[1] <= date_to:
+                            zips.append(zip_path)
+                            break  # one match is enough to include this zip
+                except Exception:
+                    pass
 
     return zips
+
+
+# ---------------------------------------------------------------------------
+# Live h5 collection
+# ---------------------------------------------------------------------------
+
+def _collect_live_h5(live_folder: str, date_from: datetime, date_to: datetime) -> List[str]:
+    """
+    Return sorted list of live h5 file paths whose filename date falls
+    within [date_from, date_to].
+    """
+    h5_files: List[str] = []
+    if not os.path.isdir(live_folder):
+        return h5_files
+    try:
+        for fname in sorted(os.listdir(live_folder)):
+            if not fname.lower().endswith(".h5"):
+                continue
+            meta = parse_filename_metadata(fname)
+            if meta and date_from <= meta[1] <= date_to:
+                h5_files.append(os.path.join(live_folder, fname))
+    except Exception:
+        pass
+    return h5_files
+
+
+def _read_h5_from_bytes(h5_bytes: bytes) -> Optional[pd.DataFrame]:
+    """
+    Read selected columns from h5 file content held in memory.
+    Uses h5py + BytesIO — no temp file needed.
+    """
+    try:
+        buf = io.BytesIO(h5_bytes)
+        with h5py.File(buf, "r") as hf:
+            key = next((k for k in ("results", "/results", "data", "/data") if k in hf), None)
+            if key is None:
+                return None
+            grp = hf[key]
+            available = [c for c in _FETCH_COLS if c in grp]
+            if not available:
+                return None
+            df = pd.DataFrame({col: grp[col][()] for col in available})
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def _read_h5_file(h5_path: str) -> Optional[pd.DataFrame]:
+    """Read selected columns from a plain (unzipped) h5 file on disk."""
+    try:
+        with open(h5_path, "rb") as fh:
+            return _read_h5_from_bytes(fh.read())
+    except Exception:
+        return None
+
+
+def _load_zip(
+    zip_path: str,
+    date_from: datetime,
+    date_to: datetime,
+) -> Tuple[str, List[pd.DataFrame]]:
+    """
+    Worker: open one zip, read matching h5 files into DataFrames.
+    Everything stays in memory — no temp files written.
+    Returns (zip_path, list_of_dataframes).
+    """
+    chunks: List[pd.DataFrame] = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            all_h5 = [e for e in zf.namelist() if e.lower().endswith(".h5")]
+            if not all_h5:
+                return zip_path, chunks
+
+            zip_is_standard = parse_filename_metadata(os.path.basename(zip_path)) is not None
+            if zip_is_standard:
+                h5_to_read = all_h5[:1]
+            else:
+                h5_to_read = [
+                    h for h in all_h5
+                    if (lambda m: m is not None and date_from <= m[1] <= date_to)(
+                        parse_filename_metadata(os.path.basename(h))
+                    )
+                ]
+
+            for h5_entry in h5_to_read:
+                try:
+                    h5_bytes = zf.read(h5_entry)
+                    df = _read_h5_from_bytes(h5_bytes)
+                    if df is not None:
+                        chunks.append(df)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return zip_path, chunks
 
 
 # ---------------------------------------------------------------------------
@@ -233,69 +384,68 @@ def load_data(
     folder_path: str,
     date_from: datetime,
     date_to: datetime,
+    progress_cb=None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Load H2O2, H2O, CH4 (+ timestamps) for the selected date range.
+    Reads from both the archive (zipped) and live (plain h5) sources.
 
-    Returns (DataFrame, list of zip paths that were read).
+    progress_cb: optional callable(fraction: float, message: str) for UI updates.
+    Returns (DataFrame, list of source paths — zips and/or h5 files).
     Raises ValueError if no data could be extracted.
     """
     zips = _collect_zips(folder_path, date_from, date_to)
-    if not zips:
-        raise ValueError("No zip files found for the selected date range.")
+    live_h5s = _collect_live_h5(
+        os.path.join(folder_path, _LIVE_SUBPATH), date_from, date_to
+    )
+
+    if not zips and not live_h5s:
+        raise ValueError("No data files found for the selected date range.")
 
     chunks: List[pd.DataFrame] = []
-    used_zips: List[str] = []
+    used_sources: List[str] = []
+    total = len(zips) + len(live_h5s)
+    done = 0
 
-    warnings.filterwarnings("ignore", category=pd.io.pytables.IncompatibilityWarning)
+    def _progress(msg: str) -> None:
+        nonlocal done
+        done += 1
+        if progress_cb:
+            progress_cb(done / total, msg)
 
-    for zip_path in zips:
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    h5_entries = [e for e in zf.namelist() if e.lower().endswith(".h5")]
-                    if not h5_entries:
-                        continue
-                    zf.extract(h5_entries[0], path=tmp)
+    # --- Archive: load zips in parallel, all in-memory ---
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        future_to_zip = {
+            pool.submit(_load_zip, zp, date_from, date_to): zp
+            for zp in zips
+        }
+        for future in as_completed(future_to_zip):
+            zp, zip_chunks = future.result()
+            if zip_chunks:
+                chunks.extend(zip_chunks)
+                used_sources.append(zp)
+            _progress(f"Loaded: {os.path.basename(zp)}")
 
-                # Find the extracted h5 file (avoids Windows path-separator issues)
-                tmp_path: Optional[str] = None
-                for root, _dirs, files in os.walk(tmp):
-                    for f in files:
-                        if f.lower().endswith(".h5"):
-                            tmp_path = os.path.join(root, f)
-                            break
-                    if tmp_path:
-                        break
-
-                if tmp_path is None:
-                    continue
-
-                file_chunks: List[pd.DataFrame] = []
-                for chunk in pd.read_hdf(tmp_path, key="results", iterator=True):
-                    available = [c for c in _FETCH_COLS if c in chunk.columns]
-                    if available:
-                        file_chunks.append(chunk[available])
-
-                if file_chunks:
-                    chunks.append(pd.concat(file_chunks, ignore_index=True))
-                    used_zips.append(zip_path)
-
-        except Exception:
-            continue
+    # --- Live: read plain h5 files directly ---
+    for h5_path in live_h5s:
+        df_live = _read_h5_file(h5_path)
+        if df_live is not None:
+            chunks.append(df_live)
+            used_sources.append(h5_path)
+        _progress(f"Loaded (live): {os.path.basename(h5_path)}")
 
     warnings.resetwarnings()
 
     if not chunks:
         raise ValueError(
-            "No data extracted. Check that the h5 files contain "
+            "No data extracted. Check that the files contain "
             "H2O2, H2O, or CH4 columns."
         )
 
     df = pd.concat(chunks, ignore_index=True)
     sort_col = "timestamp" if "timestamp" in df.columns else df.columns[0]
     df.sort_values(by=sort_col, inplace=True, ignore_index=True)
-    return df, used_zips
+    return df, used_sources
 
 
 # ---------------------------------------------------------------------------
@@ -309,16 +459,19 @@ def export_to_hdf5(df: pd.DataFrame, h5_path: str) -> None:
         hf.create_dataset("results", data=records)
 
 
-def copy_source_files(zip_paths: List[str], dest_dir: str) -> int:
+def copy_source_files(source_paths: List[str], dest_dir: str) -> int:
     """
-    Copy source zip files to dest_dir for the audit trail.
+    Copy source files (zips or plain h5) to dest_dir for the audit trail.
     Returns the number of files copied.
     """
     os.makedirs(dest_dir, exist_ok=True)
     count = 0
-    for zip_path in zip_paths:
-        shutil.copy2(zip_path, dest_dir)
-        count += 1
+    for path in source_paths:
+        try:
+            shutil.copy2(path, dest_dir)
+            count += 1
+        except Exception:
+            continue
     return count
 
 
