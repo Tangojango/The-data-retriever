@@ -6,10 +6,10 @@ Picarro Linux instruments (PI-series, e.g. NEDS2155) store data in two locations
 
 | Location | Contents |
 |---|---|
-| `/home/picarro/I2000/Archive/Data/` | Historical data — zipped h5 files organised into `YYYY-MM-DD/Datalog_Private/` subfolders. Files land here after the instrument archives them (typically within 24h of collection). |
+| `/home/picarro/I2000/Log/Archive/` | Historical data — zipped h5 files organised into `YYYY-MM-DD/Datalog_Private/` subfolders. Files land here after the instrument archives them (typically within 24h of collection). |
 | `/home/picarro/I2000/Log/DataLogger/DataLog_Private/` | Live data — individual h5 files being written in real time, not yet archived. |
 
-The default Samba configuration on these instruments exposes only the `Archive/Data/` folder as the `Data` share. This means the most recent data (last few hours up to ~24h) is not visible over the network until it gets archived.
+The default Samba configuration on these instruments exposes only the `Log/Archive/` folder as the `Data` share. This means the most recent data (last few hours up to ~24h) is not visible over the network until it gets archived.
 
 ---
 
@@ -20,14 +20,14 @@ The default Samba configuration on these instruments exposes only the `Archive/D
 Log into the instrument (SSH or local terminal) and run:
 
 ```bash
-ln -s /home/picarro/I2000/Log/DataLogger /home/picarro/I2000/Archive/Data/DataLogger
+ln -s /home/picarro/I2000/Log/DataLogger /home/picarro/I2000/Log/Archive/DataLogger
 ```
 
 This makes the live DataLogger folder appear as a subfolder inside the existing `Data` share, without changing the share path or requiring the Windows client to remount anything.
 
 Verify it worked:
 ```bash
-ls -la /home/picarro/I2000/Archive/Data/
+ls -la /home/picarro/I2000/Log/Archive/
 ```
 You should see `DataLogger -> /home/picarro/I2000/Log/DataLogger` in the listing.
 
@@ -41,7 +41,7 @@ sudo nano /etc/samba/smb.conf
 Find the `[Data]` share section and make sure it includes these two lines:
 ```ini
 [Data]
-   path = /home/picarro/I2000/Archive/Data
+   path = /home/picarro/I2000/Log/Archive
    read only = yes
    browseable = yes
    valid users = picarro
