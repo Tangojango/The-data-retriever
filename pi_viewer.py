@@ -72,7 +72,7 @@ def _datetime_axis(df: pd.DataFrame) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 defaults = {
-    "data_folder": r"Y:\Data",
+    "data_folder": r"Y:\\",
     "exports_folder": r"Y:\Exports",
     "scan": None,          # result dict from scan_instrument_folder()
     "data_df": None,       # loaded DataFrame
