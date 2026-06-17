@@ -1,0 +1,14 @@
+name: picarro-pharma
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11        # 3.12+ has known issues with pytables on Windows
+  - pandas>=2.0
+  - pytables>=3.8      # required for pd.read_hdf()
+  - h5py>=3.10         # used for writing HDF5 output only
+  - plotly>=5.20
+  - tk                 # tkinter folder-picker dialog
+  - pip
+  - pip:
+    - streamlit>=1.35
