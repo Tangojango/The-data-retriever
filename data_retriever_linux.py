@@ -176,8 +176,6 @@ def scan_instrument_folder(folder_path: str) -> Dict:
 
     return {
         "serial": serial or "UNKNOWN",
-        "serial_found": serial is not None,
-        "serial_debug": serial_debug,
         "date_min": dates[0],
         "date_max": dates[-1],
         "folder_count": folder_count,

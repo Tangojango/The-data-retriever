@@ -144,11 +144,6 @@ if scan:
         f"**Range:** {scan['date_min'].strftime('%Y-%m-%d')} "
         f"\u2192 {scan['date_max'].strftime('%Y-%m-%d')}"
     )
-    if not scan.get("serial_found"):
-        st.warning(
-            f"⚠️ Could not detect instrument serial.\n\n"
-            f"```\n{scan.get('serial_debug', 'no debug info')}\n```"
-        )
 
 # ---------------------------------------------------------------------------
 # Step 2 — Select date range and load
