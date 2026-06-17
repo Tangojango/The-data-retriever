@@ -62,63 +62,81 @@ def scan_instrument_folder(folder_path: str) -> Dict:
     """
     Scan a Picarro Linux instrument data folder for all zipped h5 files.
 
-    Handles two locations inside folder_path:
-      - <folder_path>/*.zip                              (recent, not yet sorted)
-      - <folder_path>/YYYY-MM-DD/Datalog_Private/*.zip   (historical)
+    Fast two-phase approach:
+      Phase 1 — Walk the directory and parse dates/serial from zip filenames.
+                 No zip files are opened. Completes in milliseconds even over Samba.
+      Phase 2 — Open ONE zip to detect the internal subfolder structure
+                 (e.g. 'DataLog_Private/'), then construct all h5 paths from
+                 that pattern. Discover columns from the same file.
 
-    os.walk covers both automatically.
-
-    Returns a dict:
-      {
-        'serial':     str,
-        'date_min':   datetime,
-        'date_max':   datetime,
-        'file_count': int,
-        'files_list': List[Dict],   # sorted by file_date ascending
-        'columns':    List[str],    # discovered from a sample file
-      }
+    Picarro zip and h5 files always share the same base name:
+      NEDS2155-20260403-214457Z-DataLog_Private.zip
+        └── DataLog_Private/NEDS2155-20260403-214457Z-DataLog_Private.h5
 
     Raises ValueError if the folder is missing or contains no valid files.
     """
     if not os.path.exists(folder_path):
         raise ValueError(f"Folder not found: {folder_path}")
 
-    files_list: List[Dict] = []
+    # --- Phase 1: collect zip files, parse metadata from filenames only ---
+    zip_candidates: List[Dict] = []
     serial: Optional[str] = None
 
     for root, _dirs, files in os.walk(folder_path):
         for fname in sorted(files):
             if not fname.lower().endswith(".zip"):
                 continue
-            zip_path = os.path.join(root, fname)
-            try:
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    h5_entries = [e for e in zf.namelist() if e.lower().endswith(".h5")]
-                    for h5_entry in h5_entries:
-                        meta = parse_filename_metadata(h5_entry)
-                        if meta is None:
-                            continue
-                        entry_serial, entry_dt = meta
-                        if serial is None:
-                            serial = entry_serial
-                        files_list.append(
-                            {
-                                "zip_path": zip_path,
-                                "hdf5_file": h5_entry,
-                                "file_date": entry_dt,
-                                "serial": entry_serial,
-                            }
-                        )
-            except (zipfile.BadZipFile, Exception):
+            # Treat the zip as having a matching h5 name
+            h5_name = fname[:-4] + ".h5"
+            meta = parse_filename_metadata(h5_name)
+            if meta is None:
                 continue
+            entry_serial, entry_dt = meta
+            if serial is None:
+                serial = entry_serial
+            zip_candidates.append(
+                {
+                    "zip_path": os.path.join(root, fname),
+                    "h5_basename": h5_name,
+                    "file_date": entry_dt,
+                    "serial": entry_serial,
+                }
+            )
 
-    if not files_list:
+    if not zip_candidates:
         raise ValueError(
-            f"No valid Picarro h5 files found in: {folder_path}\n"
-            "Make sure the folder contains zip archives with .h5 files inside."
+            f"No valid Picarro zip files found in: {folder_path}\n"
+            "Make sure the folder contains zip archives named in Picarro format "
+            "(e.g. NEDS2155-20260403-214457Z-DataLog_Private.zip)."
         )
 
-    files_list.sort(key=lambda x: x["file_date"])
+    zip_candidates.sort(key=lambda x: x["file_date"])
+
+    # --- Phase 2: open ONE zip to learn the internal subfolder structure ---
+    h5_prefix = ""
+    for candidate in zip_candidates[:5]:
+        try:
+            with zipfile.ZipFile(candidate["zip_path"], "r") as zf:
+                h5_entries = [e for e in zf.namelist() if e.lower().endswith(".h5")]
+                if h5_entries:
+                    # Extract the directory portion: "DataLog_Private/" or ""
+                    sample = h5_entries[0]
+                    parts = sample.replace("\\", "/").rsplit("/", 1)
+                    h5_prefix = parts[0] + "/" if len(parts) == 2 else ""
+                    break
+        except Exception:
+            continue
+
+    # Build final file list using the detected prefix
+    files_list: List[Dict] = [
+        {
+            "zip_path": c["zip_path"],
+            "hdf5_file": h5_prefix + c["h5_basename"],
+            "file_date": c["file_date"],
+            "serial": c["serial"],
+        }
+        for c in zip_candidates
+    ]
 
     columns, col_error = _discover_columns(files_list)
 
