@@ -1,0 +1,57 @@
+<Data Retrieving Tool Jan Wozniak September 2023>
+These are the instructions fo the data_retriever script, version 5
+The main purpose of the script is to browse the selected Picarro Private Data folder, 
+find all the zipped h5 files inside and concatenate them.
+
+[OPTIONS] - you have to set these in the data_retriever_settings.ini
+input_folder_path - the selected folder where the script will look for zipped h5 files
+output_folder_path - the target folder where the concatenated result file will be saved
+
+Please make sure when running the script on Windows, that the paths should have / instead of \
+date_from and date_to - use when you need to limit the list of files in the folder
+date format is like this: 2000-01-01 00:00:00
+sync_interval - leave empty to keep the original rows of the files, otherwise set a bin size in miliseconds
+ by which the data will be averaged. 
+output_filename - a name with which the result file will start
+
+For the version 5 of the script, please leave the other settings as they are.
+
+[Python Requirements]
+The script needs a Python 3.1 to run.
+You can use any Python 3 environment, but for the comfort I have used miniconda distribution
+Once you install conda, go to anaconda prompt and run the following:
+
+#Set the virtual environment named myConda
+conda create --name myConda python=3.11.5
+
+#Activate the myConda environment
+conda activate myConda
+
+#Install the needed packages
+conda install pandas
+conda install h5py
+conda install tqdm
+conda install pytables
+
+Then just run:
+python data_retriever5.py
+
+[Batch file for Windows]
+To make the use easier, I have prepared a .bat file with the following code inside (between ***** lines)
+Obviously you need to point the paths to the respective paths of the conda on your pc.
+
+******
+@echo off
+call C:/Users/Baltazar/miniconda3/Scripts/activate.bat C:/Users/Baltazar/miniconda3/envs/myConda
+python "C:/Users/Baltazar/Desktop/Data Retriever/data_retriever5.py"
+
+:prompt
+echo Work done. Do you want to close this window? (y/n):
+set /p choice=
+if /i "%choice%"=="y" (
+    call <path_to_conda>\Scripts\deactivate.bat
+    exit
+) else if /i "%choice%"=="n" goto prompt
+******
+
+
