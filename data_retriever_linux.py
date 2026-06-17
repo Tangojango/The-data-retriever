@@ -102,7 +102,8 @@ def scan_instrument_folder(folder_path: str) -> Dict:
                     serial = entry_serial
                 dates.append(entry_dt)
 
-    # If serial not found from root zips, peek at one dated subfolder
+    # If serial not found from root zips, open one zip inside a dated subfolder
+    # and read the h5 filename from its contents
     if serial is None:
         for entry in sorted(entries):
             if not _DATE_FOLDER_RE.match(entry):
@@ -115,12 +116,28 @@ def scan_instrument_folder(folder_path: str) -> Dict:
                 if not os.path.exists(d):
                     continue
                 try:
-                    for fname in os.listdir(d):
-                        if fname.lower().endswith(".zip"):
-                            meta = parse_filename_metadata(fname)
-                            if meta:
-                                serial = meta[0]
-                                break
+                    for fname in sorted(os.listdir(d)):
+                        if not fname.lower().endswith(".zip"):
+                            continue
+                        zip_path = os.path.join(d, fname)
+                        # Try filename first (fast)
+                        meta = parse_filename_metadata(fname)
+                        if meta:
+                            serial = meta[0]
+                            break
+                        # Fall back: open zip and read h5 entry names
+                        try:
+                            with zipfile.ZipFile(zip_path, "r") as zf:
+                                for name in zf.namelist():
+                                    if name.lower().endswith(".h5"):
+                                        meta = parse_filename_metadata(name)
+                                        if meta:
+                                            serial = meta[0]
+                                            break
+                        except Exception:
+                            pass
+                        if serial:
+                            break
                 except Exception:
                     pass
                 if serial:
