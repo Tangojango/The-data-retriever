@@ -62,6 +62,62 @@ def parse_filename_metadata(filename: str) -> Optional[Tuple[str, datetime]]:
 # Scan — instant, no zip opening
 # ---------------------------------------------------------------------------
 
+def _find_serial_from_subfolders(folder_path: str, entries: List[str]) -> Tuple[Optional[str], str]:
+    """
+    Open the first zip in the first plain YYYY-MM-DD/Datalog_Private folder
+    and read the serial number from the h5 filename inside the zip.
+
+    Returns (serial_or_None, debug_message).
+    """
+    log: List[str] = []
+
+    date_folders = sorted(
+        e for e in entries
+        if _DATE_FOLDER_RE.match(e) and "-RDF" not in e.upper()
+    )
+    log.append(f"Date folders found: {len(date_folders)}")
+
+    for entry in date_folders[:5]:           # try up to 5 folders
+        for subdir in ("Datalog_Private", "DataLog_Private", ""):
+            d = os.path.join(folder_path, entry, subdir) if subdir else os.path.join(folder_path, entry)
+            if not os.path.isdir(d):
+                log.append(f"  {entry}/{subdir} — not found")
+                continue
+
+            try:
+                zips = sorted(f for f in os.listdir(d) if f.lower().endswith(".zip"))
+            except Exception as e:
+                log.append(f"  {entry}/{subdir} — listdir error: {e}")
+                continue
+
+            log.append(f"  {entry}/{subdir} — {len(zips)} zip(s)")
+
+            for fname in zips[:3]:           # try up to 3 zips per folder
+                zip_path = os.path.join(d, fname)
+                # First try: parse serial from zip filename itself
+                meta = parse_filename_metadata(fname)
+                if meta:
+                    log.append(f"    {fname} — serial from filename: {meta[0]}")
+                    return meta[0], "\n".join(log)
+
+                # Second try: open zip, read h5 entry names
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        h5_names = [n for n in zf.namelist() if n.lower().endswith(".h5")]
+                    log.append(f"    {fname} — {len(h5_names)} h5 entries: {h5_names[:2]}")
+                    for h5_name in h5_names:
+                        meta = parse_filename_metadata(h5_name)
+                        if meta:
+                            log.append(f"    matched serial: {meta[0]}")
+                            return meta[0], "\n".join(log)
+                        else:
+                            log.append(f"    no match: {os.path.basename(h5_name)}")
+                except Exception as e:
+                    log.append(f"    {fname} — zip error: {e}")
+
+    return None, "\n".join(log)
+
+
 def scan_instrument_folder(folder_path: str) -> Dict:
     """
     Instant scan: reads only directory names and zip filenames.
@@ -103,50 +159,11 @@ def scan_instrument_folder(folder_path: str) -> Dict:
                 dates.append(entry_dt)
 
     # If serial not found from root zips, open one zip inside a dated subfolder
-    # and read the h5 filename from its contents.
-    # Only look in plain YYYY-MM-DD folders — explicitly skip anything with -RDF or other suffixes.
+    # and read the h5 filename from the zip's contents.
     if serial is None:
-        for entry in sorted(entries):
-            if not _DATE_FOLDER_RE.match(entry):  # skips YYYY-MM-DD-RDF and anything else
-                continue
-            if "-RDF" in entry.upper():            # belt-and-suspenders
-                continue
-            search_dirs = [
-                os.path.join(folder_path, entry, "Datalog_Private"),
-                os.path.join(folder_path, entry),
-            ]
-            for d in search_dirs:
-                if not os.path.exists(d):
-                    continue
-                try:
-                    for fname in sorted(os.listdir(d)):
-                        if not fname.lower().endswith(".zip"):
-                            continue
-                        zip_path = os.path.join(d, fname)
-                        # Try filename first (fast)
-                        meta = parse_filename_metadata(fname)
-                        if meta:
-                            serial = meta[0]
-                            break
-                        # Fall back: open zip and read h5 entry names
-                        try:
-                            with zipfile.ZipFile(zip_path, "r") as zf:
-                                for name in zf.namelist():
-                                    if name.lower().endswith(".h5"):
-                                        meta = parse_filename_metadata(name)
-                                        if meta:
-                                            serial = meta[0]
-                                            break
-                        except Exception:
-                            pass
-                        if serial:
-                            break
-                except Exception:
-                    pass
-                if serial:
-                    break
-            if serial:
-                break
+        serial, serial_debug = _find_serial_from_subfolders(folder_path, entries)
+    else:
+        serial_debug = ""
 
     if not dates:
         raise ValueError(
@@ -160,6 +177,7 @@ def scan_instrument_folder(folder_path: str) -> Dict:
     return {
         "serial": serial or "UNKNOWN",
         "serial_found": serial is not None,
+        "serial_debug": serial_debug,
         "date_min": dates[0],
         "date_max": dates[-1],
         "folder_count": folder_count,

@@ -146,10 +146,8 @@ if scan:
     )
     if not scan.get("serial_found"):
         st.warning(
-            "⚠️ Could not detect instrument serial. "
-            "Run this in the DataRetriever folder to debug:\n\n"
-            "```\npython -c \"from data_retriever_linux import scan_instrument_folder; "
-            "r=scan_instrument_folder(r'Y:\\\\'); print(r)\"\n```"
+            f"⚠️ Could not detect instrument serial.\n\n"
+            f"```\n{scan.get('serial_debug', 'no debug info')}\n```"
         )
 
 # ---------------------------------------------------------------------------
