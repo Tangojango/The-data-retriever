@@ -1,8 +1,8 @@
 """
-pharma_app.py  —  Picarro Data Viewer for pharma customers
+pi_viewer.py  —  Picarro Data Viewer for Linux instruments (PI-series)
 
 Run with:
-    streamlit run pharma_app.py
+    streamlit run pi_viewer.py
 
 Workflow:
   Step 1  Connect  — pick the instrument data folder, scan for files
@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from pharma_data_retriever import (
+from data_retriever_linux import (
     copy_source_files,
     export_to_hdf5,
     load_data,

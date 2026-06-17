@@ -1,4 +1,4 @@
-name: picarro-pharma
+name: linux-viewer
 channels:
   - conda-forge
   - defaults

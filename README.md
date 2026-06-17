@@ -1,4 +1,4 @@
-# Picarro Data Viewer — Pharma Edition
+# Picarro Data Viewer — Linux Instrument Edition
 
 Streamlit app for reviewing Picarro instrument data from a Samba-mounted Linux share.
 
@@ -19,49 +19,36 @@ Y:\Data\
         └── *.zip                      ← historical files
 ```
 
-## Setup
+## Setup (Windows — first time)
 
-### Conda (recommended — matches existing myConda environment)
-
-```bash
-conda activate myConda
-pip install streamlit plotly
+```bat
+conda env create -f environment_linux.yml
 ```
 
-### pip (fresh install)
-
-```bash
-pip install -r requirements_pharma.txt
-```
+Creates the `linux-viewer` conda environment with all required packages.
 
 ## Running the app
 
-```bash
-streamlit run pharma_app.py
+Double-click **`run.bat`**, or from the command line:
+
+```bat
+conda activate linux-viewer
+streamlit run pi_viewer.py
 ```
 
 The app opens in your default browser at `http://localhost:8501`.
-
-## Windows launcher (optional)
-
-Create a `.bat` file alongside the script:
-
-```bat
-@echo off
-call conda activate myConda
-streamlit run pharma_app.py
-pause
-```
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `pharma_app.py` | Streamlit UI — all four steps |
-| `pharma_data_retriever.py` | Core data functions (scanning, loading, export) |
-| `requirements_pharma.txt` | pip dependencies |
+| `pi_viewer.py` | Streamlit UI — all four steps |
+| `data_retriever_linux.py` | Core data functions (scanning, loading, export) |
+| `environment_linux.yml` | Conda environment (cross-platform) |
+| `requirements_linux.txt` | pip-only alternative |
+| `run.bat` | Windows one-click launcher |
 
-## Design constraints (pharma)
+## Design constraints
 
 - **No resampling, no interpolation** — raw rows only.
 - Dates are parsed from h5 filenames (`NEDS2155-20260403-214457Z-DataLog_Private.h5`), not from file modification times.

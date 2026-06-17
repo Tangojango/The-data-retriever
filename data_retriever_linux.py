@@ -1,8 +1,8 @@
 """
-pharma_data_retriever.py
+data_retriever_linux.py
 
-Core data processing for Picarro Linux instrument data.
-Designed for pharma customers using a Samba-mounted share.
+Core data processing for Picarro Linux instrument data (PI-series).
+Designed for use with a Samba-mounted instrument share.
 
 Key design decisions:
   - Dates are parsed from h5 filenames, not from file modification times
