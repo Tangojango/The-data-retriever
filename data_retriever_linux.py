@@ -4,12 +4,9 @@ data_retriever_linux.py
 Core data processing for Picarro Linux instrument data (PI-series).
 Designed for use with a Samba-mounted instrument share.
 
-Key design decisions:
-  - Dates are parsed from h5 filenames, not from file modification times
-    (modification times are unreliable over Samba / after file copy).
-  - Data is read with pd.read_hdf(..., key='results') — no h5py for reading.
-  - No resampling or interpolation (pharma data integrity requirement).
-  - Source zip files are copied to the export folder for audit trail.
+Scan is instant — reads only directory/filenames, never opens a zip.
+Zips are opened only when the user triggers a data load.
+Columns are hardcoded: H2O2, H2O, CH4 (plus timestamp/time for the x-axis).
 """
 
 import os
@@ -25,25 +22,32 @@ import h5py
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Filename parsing
+# Constants
 # ---------------------------------------------------------------------------
 
-# Matches Picarro h5 filenames such as:
-#   NEDS2155-20260403-214457Z-DataLog_Private.h5
-_FILENAME_RE = re.compile(
-    r"^([A-Z0-9]+)-(\d{8})-(\d{6})Z-.*\.h5$",
-    re.IGNORECASE,
-)
+# Columns returned to the UI (time columns are always added automatically)
+MEASURE_COLS = ["H2O2", "H2O", "CH4"]
+_TIME_COLS = ["timestamp", "time"]
+_FETCH_COLS = _TIME_COLS + MEASURE_COLS
+
+# ---------------------------------------------------------------------------
+# Filename / folder patterns
+# ---------------------------------------------------------------------------
+
+# Matches Picarro filenames: NEDS2155-20260403-214457Z-DataLog_Private
+_FILENAME_RE = re.compile(r"^([A-Z0-9]+)-(\d{8})-(\d{6})Z-", re.IGNORECASE)
+
+# Matches dated subfolders: 2026-01-01
+_DATE_FOLDER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_filename_metadata(filename: str) -> Optional[Tuple[str, datetime]]:
     """
-    Parse the serial number and UTC datetime embedded in a Picarro h5 filename.
-
-    Returns (serial, datetime) or None if the name doesn't match the pattern.
+    Parse serial number and UTC datetime from a Picarro filename (zip or h5).
+    Returns (serial, datetime) or None if the name doesn't match.
     """
-    basename = os.path.basename(filename)
-    m = _FILENAME_RE.match(basename)
+    stem = os.path.basename(filename).rsplit(".", 1)[0]
+    m = _FILENAME_RE.match(stem)
     if not m:
         return None
     serial = m.group(1).upper()
@@ -55,192 +59,170 @@ def parse_filename_metadata(filename: str) -> Optional[Tuple[str, datetime]]:
 
 
 # ---------------------------------------------------------------------------
-# Folder scanning
+# Scan — instant, no zip opening
 # ---------------------------------------------------------------------------
 
 def scan_instrument_folder(folder_path: str) -> Dict:
     """
-    Scan a Picarro Linux instrument data folder for all zipped h5 files.
+    Instant scan: reads only directory names and zip filenames.
+    No zip files are opened.
 
-    Fast two-phase approach:
-      Phase 1 — Walk the directory and parse dates/serial from zip filenames.
-                 No zip files are opened. Completes in milliseconds even over Samba.
-      Phase 2 — Open ONE zip to detect the internal subfolder structure
-                 (e.g. 'DataLog_Private/'), then construct all h5 paths from
-                 that pattern. Discover columns from the same file.
+    Folder structure handled:
+      <folder_path>/YYYY-MM-DD/Datalog_Private/*.zip  (historical)
+      <folder_path>/*.zip                              (recent, not yet sorted)
 
-    Picarro zip and h5 files always share the same base name:
-      NEDS2155-20260403-214457Z-DataLog_Private.zip
-        └── DataLog_Private/NEDS2155-20260403-214457Z-DataLog_Private.h5
-
-    Raises ValueError if the folder is missing or contains no valid files.
+    Returns:
+      serial, date_min, date_max, folder_count
     """
     if not os.path.exists(folder_path):
         raise ValueError(f"Folder not found: {folder_path}")
 
-    # --- Phase 1: collect zip files, parse metadata from filenames only ---
-    zip_candidates: List[Dict] = []
+    try:
+        entries = os.listdir(folder_path)
+    except Exception as e:
+        raise ValueError(f"Cannot read folder: {e}")
+
+    dates: List[datetime] = []
     serial: Optional[str] = None
 
-    for root, _dirs, files in os.walk(folder_path):
-        for fname in sorted(files):
-            if not fname.lower().endswith(".zip"):
-                continue
-            # Treat the zip as having a matching h5 name
-            h5_name = fname[:-4] + ".h5"
-            meta = parse_filename_metadata(h5_name)
-            if meta is None:
-                continue
-            entry_serial, entry_dt = meta
-            if serial is None:
-                serial = entry_serial
-            zip_candidates.append(
-                {
-                    "zip_path": os.path.join(root, fname),
-                    "h5_basename": h5_name,
-                    "file_date": entry_dt,
-                    "serial": entry_serial,
-                }
-            )
+    for entry in entries:
+        # Dated subfolder — grab the date from the folder name directly
+        if _DATE_FOLDER_RE.match(entry):
+            try:
+                dates.append(datetime.strptime(entry, "%Y-%m-%d"))
+            except ValueError:
+                pass
 
-    if not zip_candidates:
+        # Root-level zip (recent files not yet moved to a dated folder)
+        elif entry.lower().endswith(".zip"):
+            meta = parse_filename_metadata(entry)
+            if meta:
+                entry_serial, entry_dt = meta
+                if serial is None:
+                    serial = entry_serial
+                dates.append(entry_dt)
+
+    # If serial not found from root zips, peek at one dated subfolder
+    if serial is None:
+        for entry in sorted(entries):
+            if not _DATE_FOLDER_RE.match(entry):
+                continue
+            search_dirs = [
+                os.path.join(folder_path, entry, "Datalog_Private"),
+                os.path.join(folder_path, entry),
+            ]
+            for d in search_dirs:
+                if not os.path.exists(d):
+                    continue
+                try:
+                    for fname in os.listdir(d):
+                        if fname.lower().endswith(".zip"):
+                            meta = parse_filename_metadata(fname)
+                            if meta:
+                                serial = meta[0]
+                                break
+                except Exception:
+                    pass
+                if serial:
+                    break
+            if serial:
+                break
+
+    if not dates:
         raise ValueError(
-            f"No valid Picarro zip files found in: {folder_path}\n"
-            "Make sure the folder contains zip archives named in Picarro format "
-            "(e.g. NEDS2155-20260403-214457Z-DataLog_Private.zip)."
+            f"No dated folders or Picarro zip files found in: {folder_path}\n"
+            "Expected folders named YYYY-MM-DD or zip files named in Picarro format."
         )
 
-    zip_candidates.sort(key=lambda x: x["file_date"])
-
-    # --- Phase 2: open ONE zip to learn the internal subfolder structure ---
-    h5_prefix = ""
-    for candidate in zip_candidates[:5]:
-        try:
-            with zipfile.ZipFile(candidate["zip_path"], "r") as zf:
-                h5_entries = [e for e in zf.namelist() if e.lower().endswith(".h5")]
-                if h5_entries:
-                    # Extract the directory portion: "DataLog_Private/" or ""
-                    sample = h5_entries[0]
-                    parts = sample.replace("\\", "/").rsplit("/", 1)
-                    h5_prefix = parts[0] + "/" if len(parts) == 2 else ""
-                    break
-        except Exception:
-            continue
-
-    # Build final file list using the detected prefix
-    files_list: List[Dict] = [
-        {
-            "zip_path": c["zip_path"],
-            "hdf5_file": h5_prefix + c["h5_basename"],
-            "file_date": c["file_date"],
-            "serial": c["serial"],
-        }
-        for c in zip_candidates
-    ]
-
-    columns, col_error = _discover_columns(files_list)
+    dates.sort()
+    folder_count = sum(1 for e in entries if _DATE_FOLDER_RE.match(e))
 
     return {
         "serial": serial or "UNKNOWN",
-        "date_min": files_list[0]["file_date"],
-        "date_max": files_list[-1]["file_date"],
-        "file_count": len(files_list),
-        "files_list": files_list,
-        "columns": columns,
-        "col_error": col_error,
+        "date_min": dates[0],
+        "date_max": dates[-1],
+        "folder_count": folder_count,
+        "folder_path": folder_path,
     }
 
 
 # ---------------------------------------------------------------------------
-# Column discovery
+# Collect zips for a date range
 # ---------------------------------------------------------------------------
 
-def _discover_columns(files_list: List[Dict], max_tries: int = 5) -> Tuple[List[str], str]:
-    """
-    Read column names from the first readable file in the list.
+def _collect_zips(folder_path: str, date_from: datetime, date_to: datetime) -> List[str]:
+    """Return sorted list of zip paths that fall within [date_from, date_to]."""
+    zips: List[str] = []
 
-    Returns (columns, error_message).
-    columns is empty and error_message is set if nothing could be read.
-    """
-    errors = []
-    for file_info in files_list[:max_tries]:
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                with zipfile.ZipFile(file_info["zip_path"], "r") as zf:
-                    zf.extract(file_info["hdf5_file"], path=tmp)
+    try:
+        entries = os.listdir(folder_path)
+    except Exception:
+        return zips
 
-                # Walk the temp dir to find the extracted h5 file — avoids
-                # path-separator issues on Windows (zip uses /, Windows uses \).
-                tmp_path = None
-                for root, _dirs, files in os.walk(tmp):
-                    for f in files:
-                        if f.lower().endswith(".h5"):
-                            tmp_path = os.path.join(root, f)
-                            break
-                    if tmp_path:
-                        break
+    for entry in sorted(entries):
+        # Dated subfolder
+        if _DATE_FOLDER_RE.match(entry):
+            try:
+                folder_date = datetime.strptime(entry, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if not (date_from.date() <= folder_date <= date_to.date()):
+                continue
 
-                if tmp_path is None:
-                    errors.append(f"{file_info['hdf5_file']}: extracted file not found in temp dir")
-                    continue
+            # Prefer Datalog_Private subfolder, fall back to dated folder root
+            datalog = os.path.join(folder_path, entry, "Datalog_Private")
+            search = datalog if os.path.exists(datalog) else os.path.join(folder_path, entry)
+            try:
+                for fname in sorted(os.listdir(search)):
+                    if fname.lower().endswith(".zip"):
+                        zips.append(os.path.join(search, fname))
+            except Exception:
+                continue
 
-                # Try common Picarro HDF5 keys
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    for key in ("results", "/results", "data", "/data"):
-                        try:
-                            df = pd.read_hdf(tmp_path, key=key, start=0, stop=10)
-                            return list(df.columns), ""
-                        except KeyError:
-                            continue
-                        except Exception as e:
-                            errors.append(f"{file_info['hdf5_file']} key={key}: {e}")
-                            break
+        # Root-level zip (recent)
+        elif entry.lower().endswith(".zip"):
+            meta = parse_filename_metadata(entry)
+            if meta and date_from <= meta[1] <= date_to:
+                zips.append(os.path.join(folder_path, entry))
 
-        except Exception as e:
-            errors.append(f"{file_info['zip_path']}: {e}")
-            continue
-
-    return [], "\n".join(errors) if errors else "No readable h5 files found."
+    return zips
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-# Columns always included so the time axis is available for plotting.
-_TIME_COLS = {"timestamp", "time"}
-
-
 def load_data(
-    files_list: List[Dict],
-    columns: List[str],
-) -> Tuple[pd.DataFrame, List[Dict]]:
+    folder_path: str,
+    date_from: datetime,
+    date_to: datetime,
+) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Load and concatenate the requested columns from the given file list.
+    Load H2O2, H2O, CH4 (+ timestamps) for the selected date range.
 
-    timestamp and time are always included (needed for the chart x-axis)
-    even if the user did not select them.
-
-    Returns:
-        (DataFrame, list of file_info dicts that were actually read)
-
-    Raises ValueError if nothing could be extracted.
+    Returns (DataFrame, list of zip paths that were read).
+    Raises ValueError if no data could be extracted.
     """
-    fetch_cols = list(_TIME_COLS | set(columns))
+    zips = _collect_zips(folder_path, date_from, date_to)
+    if not zips:
+        raise ValueError("No zip files found for the selected date range.")
 
     chunks: List[pd.DataFrame] = []
-    used_files: List[Dict] = []
+    used_zips: List[str] = []
 
     warnings.filterwarnings("ignore", category=pd.io.pytables.IncompatibilityWarning)
 
-    for file_info in files_list:
+    for zip_path in zips:
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                with zipfile.ZipFile(file_info["zip_path"], "r") as zf:
-                    zf.extract(file_info["hdf5_file"], path=tmp)
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    h5_entries = [e for e in zf.namelist() if e.lower().endswith(".h5")]
+                    if not h5_entries:
+                        continue
+                    zf.extract(h5_entries[0], path=tmp)
 
-                tmp_path = None
+                # Find the extracted h5 file (avoids Windows path-separator issues)
+                tmp_path: Optional[str] = None
                 for root, _dirs, files in os.walk(tmp):
                     for f in files:
                         if f.lower().endswith(".h5"):
@@ -254,13 +236,13 @@ def load_data(
 
                 file_chunks: List[pd.DataFrame] = []
                 for chunk in pd.read_hdf(tmp_path, key="results", iterator=True):
-                    available = [c for c in fetch_cols if c in chunk.columns]
+                    available = [c for c in _FETCH_COLS if c in chunk.columns]
                     if available:
                         file_chunks.append(chunk[available])
 
                 if file_chunks:
                     chunks.append(pd.concat(file_chunks, ignore_index=True))
-                    used_files.append(file_info)
+                    used_zips.append(zip_path)
 
         except Exception:
             continue
@@ -268,15 +250,15 @@ def load_data(
     warnings.resetwarnings()
 
     if not chunks:
-        raise ValueError("No data could be extracted from the selected files.")
+        raise ValueError(
+            "No data extracted. Check that the h5 files contain "
+            "H2O2, H2O, or CH4 columns."
+        )
 
     df = pd.concat(chunks, ignore_index=True)
-    df.sort_values(
-        by="timestamp" if "timestamp" in df.columns else df.columns[0],
-        inplace=True,
-        ignore_index=True,
-    )
-    return df, used_files
+    sort_col = "timestamp" if "timestamp" in df.columns else df.columns[0]
+    df.sort_values(by=sort_col, inplace=True, ignore_index=True)
+    return df, used_zips
 
 
 # ---------------------------------------------------------------------------
@@ -290,22 +272,16 @@ def export_to_hdf5(df: pd.DataFrame, h5_path: str) -> None:
         hf.create_dataset("results", data=records)
 
 
-def copy_source_files(files_list: List[Dict], dest_dir: str) -> int:
+def copy_source_files(zip_paths: List[str], dest_dir: str) -> int:
     """
-    Copy unique source zip files to dest_dir for the audit trail.
-    Each zip is copied only once even if it contained multiple h5 files.
-
-    Returns the number of zip files copied.
+    Copy source zip files to dest_dir for the audit trail.
+    Returns the number of files copied.
     """
     os.makedirs(dest_dir, exist_ok=True)
-    seen: set = set()
     count = 0
-    for file_info in files_list:
-        zip_path = file_info["zip_path"]
-        if zip_path not in seen:
-            shutil.copy2(zip_path, dest_dir)
-            seen.add(zip_path)
-            count += 1
+    for zip_path in zip_paths:
+        shutil.copy2(zip_path, dest_dir)
+        count += 1
     return count
 
 
@@ -315,14 +291,13 @@ def copy_source_files(files_list: List[Dict], dest_dir: str) -> int:
 
 # Picarro timestamp = ms since 0001-01-01 00:00:00
 # Unix epoch        = seconds since 1970-01-01 00:00:00
-# Offset            = 62135596800 seconds between the two origins
-PICARRO_EPOCH_OFFSET_MS = 62_135_596_800_000  # milliseconds
+# Offset between origins = 62135596800 seconds
+PICARRO_EPOCH_OFFSET_MS = 62_135_596_800_000
 
 
 def picarro_ts_to_datetime(series: pd.Series) -> pd.Series:
     """Convert a Picarro millisecond timestamp series to UTC datetime."""
-    unix_ms = series - PICARRO_EPOCH_OFFSET_MS
-    return pd.to_datetime(unix_ms, unit="ms", utc=True)
+    return pd.to_datetime(series - PICARRO_EPOCH_OFFSET_MS, unit="ms", utc=True)
 
 
 def unix_ts_to_datetime(series: pd.Series) -> pd.Series:
