@@ -9,6 +9,7 @@ dependencies:
   - tk                 # tkinter folder-picker dialog (included with Python on conda)
   - pip
   - pip:
-    - plotly>=5.20     # not on defaults channel, install via pip
-    - streamlit>=1.35
-    - kaleido>=0.2     # required for PDF chart export
+    - plotly>=5.20                 # not on defaults channel, install via pip
+    - dash>=2.18                   # replaces streamlit; reactive callbacks
+    - dash-bootstrap-components>=1.6
+    - kaleido>=0.2                 # required for PDF chart export

@@ -46,5 +46,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-streamlit run "%~dp0pi_viewer.py"
+python "%~dp0pi_viewer_dash.py"
 pause

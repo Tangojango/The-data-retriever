@@ -21,6 +21,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# One distinct color per measurement channel
+_TRACE_COLORS = {
+    "H2O2": "#1f77b4",
+    "H2O":  "#ff7f0e",
+    "CH4":  "#2ca02c",
+}
+
 from data_retriever_linux import (
     MEASURE_COLS,
     copy_source_files,
@@ -85,6 +92,9 @@ defaults = {
     "date_from": None,
     "date_to": None,
     "chart_fig": None,
+    "report_name": "",
+    "sel_min": None,
+    "sel_max": None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -239,12 +249,28 @@ if st.session_state.data_df is not None:
         f"{st.session_state.date_from} → {st.session_state.date_to})"
     )
 
+    report_name = st.text_input(
+        "Report name (appears in PDF header)",
+        value=st.session_state.report_name,
+        placeholder="e.g. Stability Run #12 — Line 3",
+    )
+    st.session_state.report_name = report_name
+
     dt_axis = _datetime_axis(df)
     available_cols = [c for c in MEASURE_COLS if c in df.columns]
 
     for col in MEASURE_COLS:
         if col not in df.columns:
             st.info(f"{col} — not found in this dataset, skipping.")
+
+    serial_str = st.session_state.scan["serial"]
+    d_from = st.session_state.date_from
+    d_to = st.session_state.date_to
+    title_line1 = report_name if report_name else "Picarro Data Report"
+    title_line2 = (
+        f"{serial_str}  ·  "
+        f"{d_from.strftime('%Y-%m-%d')} → {d_to.strftime('%Y-%m-%d')}"
+    )
 
     n = len(available_cols)
     fig = make_subplots(
@@ -260,7 +286,7 @@ if st.session_state.data_df is not None:
                 y=df[col],
                 mode="lines",
                 name=col,
-                line=dict(width=1),
+                line=dict(width=1.5, color=_TRACE_COLORS.get(col, "#444")),
             ),
             row=i, col=1,
         )
@@ -276,13 +302,49 @@ if st.session_state.data_df is not None:
         row=n, col=1,
     )
     fig.update_layout(
+        title=dict(
+            text=f"<b>{title_line1}</b><br><sup>{title_line2}</sup>",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=15),
+        ),
         height=280 * n,
-        margin=dict(l=60, r=20, t=40, b=40),
+        margin=dict(l=60, r=20, t=80, b=40),
         plot_bgcolor="#fafafa",
+        paper_bgcolor="white",
+        template="plotly_white",
         showlegend=False,
     )
-    st.plotly_chart(fig, width="stretch")
+    chart_event = st.plotly_chart(
+        fig,
+        key="chart_select",
+        on_select="rerun",
+        selection_mode=["box"],
+        width="stretch",
+    )
     st.session_state.chart_fig = fig
+
+    # --- Selection range display ---
+    pts = (chart_event.selection or {}).get("points", []) if chart_event else []
+    if pts:
+        x_vals = sorted([p["x"] for p in pts if "x" in p])
+        st.session_state.sel_min = x_vals[0]
+        st.session_state.sel_max = x_vals[-1]
+
+    sel_min = st.session_state.get("sel_min")
+    sel_max = st.session_state.get("sel_max")
+
+    if sel_min and sel_max:
+        st.caption("📌 Selection — use the Box Select tool (□) in the chart toolbar to update")
+        sc1, sc2, sc3 = st.columns([3, 3, 1])
+        sel_from_str = sc1.text_input("Selected from", value=str(sel_min), key="sel_from_text")
+        sel_to_str   = sc2.text_input("Selected to",   value=str(sel_max), key="sel_to_text")
+        if sc3.button("✕ Clear", key="clear_sel"):
+            st.session_state.sel_min = None
+            st.session_state.sel_max = None
+            st.rerun()
+    else:
+        st.caption("💡 Use the Box Select tool (□) in the chart toolbar to select a sub-range for export.")
 
     # -----------------------------------------------------------------------
     # Step 4 — Export
@@ -313,27 +375,55 @@ if st.session_state.data_df is not None:
     col_exp, col_pdf = st.columns([3, 1])
 
     with col_exp:
-        if st.button("💾 Export (CSV + HDF5 + source files)", type="primary", use_container_width=True):
+        sel_active = bool(st.session_state.get("sel_min") and st.session_state.get("sel_max"))
+        btn_label = "💾 Export selected range" if sel_active else "💾 Export (CSV + HDF5 + source files)"
+        if st.button(btn_label, type="primary", use_container_width=True):
             s = st.session_state.scan["serial"]
             d_from = st.session_state.date_from
             d_to = st.session_state.date_to
             ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}_{ts_now}"
+
+            # Filter DataFrame to selection if active
+            df_export = df
+            if sel_active:
+                try:
+                    dt_axis_full = _datetime_axis(df)
+                    sel_from_dt = pd.to_datetime(
+                        st.session_state.get("sel_from_text") or st.session_state.sel_min,
+                        utc=True
+                    )
+                    sel_to_dt = pd.to_datetime(
+                        st.session_state.get("sel_to_text") or st.session_state.sel_max,
+                        utc=True
+                    )
+                    mask = (dt_axis_full >= sel_from_dt) & (dt_axis_full <= sel_to_dt)
+                    df_export = df[mask].reset_index(drop=True)
+                    d_from_str = sel_from_dt.strftime("%Y%m%d_%H%M")
+                    d_to_str   = sel_to_dt.strftime("%Y%m%d_%H%M")
+                except Exception:
+                    df_export = df
+                    d_from_str = d_from.strftime("%Y%m%d")
+                    d_to_str   = d_to.strftime("%Y%m%d")
+            else:
+                d_from_str = d_from.strftime("%Y%m%d")
+                d_to_str   = d_to.strftime("%Y%m%d")
+
+            folder_name = f"{s}_{d_from_str}_{d_to_str}_{ts_now}"
             export_dir = Path(exports_folder) / folder_name
-            base_name = f"{s}_{d_from.strftime('%Y%m%d')}_{d_to.strftime('%Y%m%d')}"
+            base_name  = f"{s}_{d_from_str}_{d_to_str}"
 
             with st.spinner("Exporting…"):
                 try:
                     export_dir.mkdir(parents=True, exist_ok=True)
                     csv_path = export_dir / f"{base_name}.csv"
-                    h5_path = export_dir / f"{base_name}.h5"
+                    h5_path  = export_dir / f"{base_name}.h5"
                     orig_dir = export_dir / "original_files"
 
-                    df.to_csv(csv_path, index=False)
-                    export_to_hdf5(df, str(h5_path))
+                    df_export.to_csv(csv_path, index=False)
+                    export_to_hdf5(df_export, str(h5_path))
                     n_src = copy_source_files(st.session_state.used_zips, str(orig_dir))
 
-                    st.success(f"Exported to `{export_dir}`")
+                    st.success(f"Exported {len(df_export):,} rows to `{export_dir}`")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("CSV", f"{csv_path.stat().st_size / 1e6:.1f} MB")
                     c2.metric("HDF5", f"{h5_path.stat().st_size / 1e6:.1f} MB")
