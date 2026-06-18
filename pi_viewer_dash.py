@@ -433,6 +433,9 @@ def cb_scan(n_clicks, folder):
 
     d_min = scan["date_min"].date()
     d_max = scan["date_max"].date()
+    # Default "From" to the 1st of the current month, clamped to actual data range
+    today = date.today()
+    d_default_from = max(d_min, date(today.year, today.month, 1))
     live_count = scan.get("live_count", 0)
     live_badge = (
         dbc.Badge(f"Live: {live_count} files", color="success", className="ms-2")
@@ -468,7 +471,7 @@ def cb_scan(n_clicks, folder):
         scan_json,
         result,
         {"display": "block"},
-        d_min, d_min, d_max,
+        d_default_from, d_min, d_max,
         d_max, d_min, d_max,
         f"— {scan['serial']}",
     )
