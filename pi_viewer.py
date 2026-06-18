@@ -281,7 +281,7 @@ if st.session_state.data_df is not None:
         plot_bgcolor="#fafafa",
         showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.session_state.chart_fig = fig
 
     # -----------------------------------------------------------------------
