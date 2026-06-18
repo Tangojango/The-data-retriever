@@ -76,6 +76,41 @@ def _datetime_axis(df: pd.DataFrame) -> pd.Series:
     return pd.Series(range(len(df)))
 
 
+def _zoom_range_from_relayout(relayout_data: dict | None):
+    """Extract (x_min_str, x_max_str) from Plotly relayoutData after a zoom, or (None, None)."""
+    if not relayout_data:
+        return None, None
+    # Standard format from mouse zoom
+    x0 = relayout_data.get("xaxis.range[0]")
+    x1 = relayout_data.get("xaxis.range[1]")
+    if x0 and x1:
+        return str(x0), str(x1)
+    # Array format
+    rng = relayout_data.get("xaxis.range")
+    if rng and len(rng) >= 2:
+        return str(rng[0]), str(rng[1])
+    return None, None
+
+
+def _filter_df_to_range(df: pd.DataFrame, x_from: str, x_to: str):
+    """Return df filtered to [x_from, x_to] (both UTC strings). Returns full df on error."""
+    try:
+        dt_axis = _datetime_axis(df)
+        if hasattr(dt_axis, "dt") and dt_axis.dt.tz is None:
+            dt_axis = dt_axis.dt.tz_localize("UTC")
+
+        def _to_utc(s):
+            t = pd.to_datetime(s)
+            return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+        mask = (dt_axis >= _to_utc(x_from)) & (dt_axis <= _to_utc(x_to))
+        result = df[mask].reset_index(drop=True)
+        return result if not result.empty else df
+    except Exception as e:
+        print(f"[filter] failed: {e}")
+        return df
+
+
 def _build_figure(
     df: pd.DataFrame,
     serial: str,
@@ -556,9 +591,10 @@ def cb_browse_export(n_clicks):
     State("export-folder", "value"),
     State("sel-from", "value"),
     State("sel-to",   "value"),
+    State("main-chart", "relayoutData"),
     prevent_initial_call=True,
 )
-def cb_export(n_clicks, data_key, export_folder, sel_from, sel_to):
+def cb_export(n_clicks, data_key, export_folder, sel_from, sel_to, relayout_data):
     if not data_key or data_key not in _DATA_CACHE:
         raise PreventUpdate
 
@@ -568,28 +604,21 @@ def cb_export(n_clicks, data_key, export_folder, sel_from, sel_to):
     d_from = entry["d_from"]
     d_to   = entry["d_to"]
 
-    # Optionally filter to selection range
+    # Determine range: box selection > zoom > full
+    x_from = (sel_from if sel_from and sel_to else None) or _zoom_range_from_relayout(relayout_data)[0]
+    x_to   = (sel_to   if sel_from and sel_to else None) or _zoom_range_from_relayout(relayout_data)[1]
+
     df_export = df
     d_from_str = d_from.replace("-", "")
     d_to_str   = d_to.replace("-", "")
 
-    if sel_from and sel_to:
+    if x_from and x_to:
+        df_export = _filter_df_to_range(df, x_from, x_to)
         try:
-            dt_axis = _datetime_axis(df)
-            if hasattr(dt_axis, "dt") and dt_axis.dt.tz is None:
-                dt_axis = dt_axis.dt.tz_localize("UTC")
-            sel_from_dt = pd.to_datetime(sel_from).tz_localize("UTC") \
-                if pd.to_datetime(sel_from).tzinfo is None \
-                else pd.to_datetime(sel_from).tz_convert("UTC")
-            sel_to_dt = pd.to_datetime(sel_to).tz_localize("UTC") \
-                if pd.to_datetime(sel_to).tzinfo is None \
-                else pd.to_datetime(sel_to).tz_convert("UTC")
-            mask = (dt_axis >= sel_from_dt) & (dt_axis <= sel_to_dt)
-            df_export = df[mask].reset_index(drop=True)
-            d_from_str = sel_from_dt.strftime("%Y%m%d_%H%M")
-            d_to_str   = sel_to_dt.strftime("%Y%m%d_%H%M")
-        except Exception as e:
-            print(f"[Export] selection filter failed: {e} — using full range")
+            d_from_str = pd.to_datetime(x_from).strftime("%Y%m%d_%H%M")
+            d_to_str   = pd.to_datetime(x_to).strftime("%Y%m%d_%H%M")
+        except Exception:
+            pass
 
     ts_now     = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"{serial}_{d_from_str}_{d_to_str}_{ts_now}"
@@ -630,9 +659,10 @@ def cb_export(n_clicks, data_key, export_folder, sel_from, sel_to):
     State("report-name", "value"),
     State("sel-from", "value"),
     State("sel-to",   "value"),
+    State("main-chart", "relayoutData"),
     prevent_initial_call=True,
 )
-def cb_pdf(n_clicks, data_key, report_name, sel_from, sel_to):
+def cb_pdf(n_clicks, data_key, report_name, sel_from, sel_to, relayout_data):
     if not data_key or data_key not in _DATA_CACHE:
         raise PreventUpdate
 
@@ -642,27 +672,19 @@ def cb_pdf(n_clicks, data_key, report_name, sel_from, sel_to):
     d_from = entry["d_from"]
     d_to   = entry["d_to"]
 
-    # If a selection is active, zoom the PDF to that range
+    # Determine range: box selection > zoom > full
+    x_from = (sel_from if sel_from and sel_to else None) or _zoom_range_from_relayout(relayout_data)[0]
+    x_to   = (sel_to   if sel_from and sel_to else None) or _zoom_range_from_relayout(relayout_data)[1]
+
     df_pdf = df
     d_from_pdf, d_to_pdf = d_from, d_to
-    if sel_from and sel_to:
+    if x_from and x_to:
+        df_pdf = _filter_df_to_range(df, x_from, x_to)
         try:
-            dt_axis = _datetime_axis(df)
-            # Ensure both sides are UTC-aware for comparison
-            if hasattr(dt_axis, "dt") and dt_axis.dt.tz is None:
-                dt_axis = dt_axis.dt.tz_localize("UTC")
-            sel_from_dt = pd.to_datetime(sel_from).tz_localize("UTC") \
-                if pd.to_datetime(sel_from).tzinfo is None \
-                else pd.to_datetime(sel_from).tz_convert("UTC")
-            sel_to_dt = pd.to_datetime(sel_to).tz_localize("UTC") \
-                if pd.to_datetime(sel_to).tzinfo is None \
-                else pd.to_datetime(sel_to).tz_convert("UTC")
-            mask = (dt_axis >= sel_from_dt) & (dt_axis <= sel_to_dt)
-            df_pdf = df[mask].reset_index(drop=True)
-            d_from_pdf = sel_from_dt.strftime("%Y-%m-%d %H:%M")
-            d_to_pdf   = sel_to_dt.strftime("%Y-%m-%d %H:%M")
-        except Exception as e:
-            print(f"[PDF] selection filter failed: {e} — using full range")
+            d_from_pdf = pd.to_datetime(x_from).strftime("%Y-%m-%d %H:%M")
+            d_to_pdf   = pd.to_datetime(x_to).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
 
     fig = _build_figure(df_pdf, serial, d_from_pdf, d_to_pdf, report_name or "")
 
