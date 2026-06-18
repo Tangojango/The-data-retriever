@@ -17,6 +17,7 @@ import io
 import os
 import re
 import shutil
+import tempfile
 import warnings
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -307,23 +308,57 @@ def _collect_live_h5(live_folder: str, date_from: datetime, date_to: datetime) -
 
 def _read_h5_from_bytes(h5_bytes: bytes) -> Optional[pd.DataFrame]:
     """
-    Read selected columns from h5 file content held in memory.
-    Uses h5py + BytesIO — no temp file needed.
+    Read selected columns from h5 bytes.
+
+    Strategy:
+    1. Try h5py + BytesIO (works for plain compound-dataset h5 files, no disk needed).
+    2. Fall back to NamedTemporaryFile + pd.read_hdf (handles PyTables format).
+    The parallel network fetch is the main speedup; the local temp write is fast.
     """
+    # --- Attempt 1: h5py from BytesIO (no disk I/O) ---
     try:
         buf = io.BytesIO(h5_bytes)
         with h5py.File(buf, "r") as hf:
             key = next((k for k in ("results", "/results", "data", "/data") if k in hf), None)
-            if key is None:
-                return None
-            grp = hf[key]
-            available = [c for c in _FETCH_COLS if c in grp]
-            if not available:
-                return None
-            df = pd.DataFrame({col: grp[col][()] for col in available})
-        return df if not df.empty else None
+            if key is not None:
+                obj = hf[key]
+                if isinstance(obj, h5py.Dataset) and obj.dtype.names:
+                    data = obj[()]
+                    available = [c for c in _FETCH_COLS if c in obj.dtype.names]
+                    if available:
+                        df = pd.DataFrame({col: data[col] for col in available})
+                        if not df.empty:
+                            return df
+                elif isinstance(obj, h5py.Group):
+                    available = [c for c in _FETCH_COLS if c in obj]
+                    if available:
+                        df = pd.DataFrame({col: obj[col][()] for col in available})
+                        if not df.empty:
+                            return df
     except Exception:
-        return None
+        pass
+
+    # --- Attempt 2: temp file + pd.read_hdf (PyTables format) ---
+    tmp_path = None
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+            tmp.write(h5_bytes)
+            tmp_path = tmp.name
+        df = pd.read_hdf(tmp_path, key="results")
+        cols = [c for c in _FETCH_COLS if c in df.columns]
+        if cols and not df.empty:
+            return df[cols]
+    except Exception:
+        pass
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    return None
 
 
 def _read_h5_file(h5_path: str) -> Optional[pd.DataFrame]:
